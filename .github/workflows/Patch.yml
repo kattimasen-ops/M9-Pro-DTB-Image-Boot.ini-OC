@@ -16,11 +16,14 @@ jobs:
     steps:
       - name: Checkout Repository
         uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
 
       - name: Install DTC & Python
         run: |
+          set -euo pipefail
           sudo apt-get update
-          sudo apt-get install -y device-tree-compiler python3
+          sudo apt-get install -y --no-install-recommends device-tree-compiler python3
 
       - name: Patch DTB & boot.ini (inline)
         run: |
@@ -41,7 +44,7 @@ jobs:
           with open("base.dts", "r", encoding="utf-8") as f:
               dts = f.read()
 
-          # 2. Gerätename ersetzen (alle bekannten Bezeichnungen)
+          # 2. Gerätenamen ersetzen (alle bekannten Bezeichnungen)
           replacements = [
               ("rk3326-k36s-linux", "rk3326-m9pro-linux"),
               ("rk3326-k36s", "rk3326-m9pro"),
@@ -57,12 +60,12 @@ jobs:
           # 3. Root-Model auf "M9 Pro - St0len-One" setzen
           dts = re.sub(r'model\s*=\s*"[^"]*";', 'model = "M9 Pro - St0len-One";', dts, count=1)
 
-          # 4. Compatible-String anpassen (z.B. rockchip,rk3326-k36 -> rockchip,rk3326-m9pro)
+          # 4. Compatible-String anpassen[cite: 6]
           dts = re.sub(r'(compatible\s*=\s*")([^"]*)(";)',
                        lambda m: m.group(1) + m.group(2).replace('k36', 'm9pro') + m.group(3),
                        dts, count=1)
 
-          # 5. Panel-Node hinzufügen oder erweitern
+          # 5. Panel-Node hinzufügen oder erweitern[cite: 6]
           if re.search(r'\bpanel\s*\{', dts):
               dts = re.sub(r'(\bpanel\s*\{[^}]*?)(\bmodel\s*=\s*"[^"]*";)?',
                            lambda m: m.group(1) + '\n\t\tmodel = "M9 Pro Display";' if not m.group(2) else m.group(0),
@@ -79,11 +82,11 @@ jobs:
               if last_brace != -1:
                   dts = dts[:last_brace] + panel_node + "\n" + dts[last_brace:]
 
-          # 6. Zusätzliche Board-Property für ArkOS4Clones
+          # 6. Zusätzliche Board-Property für ArkOS4Clones[cite: 6]
           if 'm9pro,board' not in dts:
               dts = dts.replace('/ {', '/ {\n\tm9pro,board = "M9 Pro - St0len-One";', 1)
 
-          # 7. DTS speichern und kompilieren
+          # 7. DTS speichern und kompilieren[cite: 6]
           with open("merged.dts", "w", encoding="utf-8") as f:
               f.write(dts)
 
@@ -92,7 +95,7 @@ jobs:
                           "-Wno-unique_unit_address", "-Wno-graph_child_address",
                           "-o", OUTPUT_DTB, "merged.dts"], check=True)
 
-          # 8. boot.ini anpassen
+          # 8. boot.ini anpassen[cite: 6]
           if os.path.exists("boot.ini"):
               with open("boot.ini", "r", encoding="utf-8") as f:
                   boot_ini = f.read()
@@ -103,7 +106,7 @@ jobs:
           else:
               print("[!] boot.ini nicht gefunden – überspringe")
 
-          # 9. Verifikation
+          # 9. Verifikation[cite: 6]
           subprocess.run(["dtc", "-I", "dtb", "-O", "dts", "-f", "-o", "verify.dts", OUTPUT_DTB], check=True)
           with open("verify.dts", "r", encoding="utf-8") as f:
               final_dts = f.read()
@@ -140,7 +143,7 @@ jobs:
             patch_verification.log
           retention-days: 14
 
-      - name: Commit & Push (force)
+      - name: Commit & Push
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
@@ -148,4 +151,7 @@ jobs:
           git config --global user.email "github-actions[bot]@users.noreply.github.com"
           git add rk3326-m9pro-linux.dtb boot.ini patch_verification.log
           git diff --quiet && git diff --staged --quiet || git commit -m "build(dtb): patch M9 Pro device name & panel [skip ci]"
-          git push --force origin main
+          
+          # Ermittle den aktuellen Branch dynamisch, um Push-Fehler zu vermeiden
+          BRANCH=${GITHUB_REF#refs/heads/}
+          git push origin "${BRANCH}" --force
