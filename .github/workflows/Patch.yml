@@ -5,10 +5,6 @@ on:
     branches: [ main, master ]
   workflow_dispatch:
 
-concurrency:
-  group: ${{ github.workflow }}-${{ github.ref }}
-  cancel-in-progress: true
-
 permissions:
   contents: write
 
@@ -29,55 +25,53 @@ jobs:
       - name: Patch DTB & boot.ini
         run: |
           python3 - << 'EOF'
-          import re, subprocess, os, glob
+          import re, subprocess, os
 
-          # Find the base DTB (excluding our output)
-          dtb_files = [f for f in glob.glob("*.dtb") if not f.startswith("rk3326-m9pro")]
-          if not dtb_files:
-              print("ERROR: No DTB file found in repository root")
+          # Spezifische Dateinamen
+          INPUT_DTB = "rk3326-k36s-linux.dtb"
+          OUTPUT_DTB = "rk3326-m9pro-linux.dtb"
+
+          if not os.path.exists(INPUT_DTB):
+              print(f"ERROR: {INPUT_DTB} nicht gefunden!")
               exit(1)
-          base_dtb = dtb_files[0]
-          print(f"[*] Source DTB: {base_dtb}")
 
-          # Decompile
-          subprocess.run(["dtc", "-I", "dtb", "-O", "dts", "-f", "-o", "base.dts", base_dtb], check=True)
+          # Dekompilieren
+          print("[*] Dekompiliere DTB...")
+          subprocess.run(["dtc", "-I", "dtb", "-O", "dts", "-f", "-o", "base.dts", INPUT_DTB], check=True)
           with open("base.dts", "r", encoding="utf-8") as f:
               dts = f.read()
 
-          # ---- Device name replacements ----
-          # Specific strings first
+          # ---- Gerätename ersetzen (alle Vorkommen) ----
+          # Spezifische zuerst, dann allgemeiner
           replacements = [
-              ("aislpc r36t/k36", "M9 Pro - St0len-One"),
-              ("aislpc r36t", "M9 Pro - St0len-One"),
-              ("aislpc r36s", "M9 Pro - St0len-One"),
-              ("aislpc r36", "M9 Pro - St0len-One"),
-              ("r36t/k36", "M9 Pro - St0len-One"),
-              ("r36t", "M9 Pro - St0len-One"),
+              ("rk3326-k36s-linux", "rk3326-m9pro-linux"),
+              ("rk3326-k36s", "rk3326-m9pro"),
               ("r36s", "M9 Pro - St0len-One"),
+              ("r36t", "M9 Pro - St0len-One"),
               ("k36s", "M9 Pro - St0len-One"),
               ("k36", "M9 Pro - St0len-One"),
-              ("rk3326-k36s", "rk3326-m9pro"),
-              ("rk3326-k36", "rk3326-m9pro"),
+              ("aislpc", "M9 Pro"),
+              ("St0len-One", "St0len-One")  # placeholder
           ]
           for old, new in replacements:
               dts = dts.replace(old, new)
 
-          # Fix root model (first occurrence)
+          # Root model ersetzen (erste "model" Property)
           dts = re.sub(r'model\s*=\s*"[^"]*";', 'model = "M9 Pro - St0len-One";', dts, count=1)
 
-          # Fix compatible: replace k36 in board part (e.g., rockchip,rk3326-k36 -> rockchip,rk3326-m9pro)
+          # Compatible String anpassen (k36 -> m9pro)
           dts = re.sub(r'(compatible\s*=\s*")([^"]*)(";)',
                        lambda m: m.group(1) + m.group(2).replace('k36', 'm9pro') + m.group(3),
                        dts, count=1)
 
-          # ---- Add / update panel node ----
-          # If there is a node named "panel", add model property if missing
+          # Panel-Node hinzufügen oder modifizieren
           if re.search(r'\bpanel\s*\{', dts):
+              # Falls panel existiert, füge model hinzu
               dts = re.sub(r'(\bpanel\s*\{[^}]*?)(\bmodel\s*=\s*"[^"]*";)?',
                            lambda m: m.group(1) + '\n\t\tmodel = "M9 Pro Display";' if not m.group(2) else m.group(0),
                            dts, flags=re.DOTALL)
           else:
-              # Insert a simple panel node in the root
+              # Neuen Panel-Node in Root einfügen
               panel_node = '''
       panel {
           compatible = "simple-panel";
@@ -85,38 +79,38 @@ jobs:
           status = "okay";
       };
 '''
+              # Vor dem letzten "};" einfügen
               last_brace = dts.rfind('};')
               if last_brace != -1:
                   dts = dts[:last_brace] + panel_node + "\n" + dts[last_brace:]
 
-          # Add custom board property
+          # M9 Pro Custom Property hinzufügen
           if 'm9pro,board' not in dts:
               dts = dts.replace('/ {', '/ {\n\tm9pro,board = "M9 Pro - St0len-One";', 1)
 
-          # Write DTS and compile
+          # DTS speichern und kompilieren
           with open("merged.dts", "w", encoding="utf-8") as f:
               f.write(dts)
 
-          output_dtb = "rk3326-m9pro-linux.dtb"
-          print("[*] Compiling final DTB...")
+          print("[*] Kompiliere finale DTB...")
           subprocess.run(["dtc", "-I", "dts", "-O", "dtb", "-f",
                           "-Wno-unique_unit_address", "-Wno-graph_child_address",
-                          "-o", output_dtb, "merged.dts"], check=True)
+                          "-o", OUTPUT_DTB, "merged.dts"], check=True)
 
-          # ---- Patch boot.ini ----
+          # boot.ini anpassen
           if os.path.exists("boot.ini"):
               with open("boot.ini", "r", encoding="utf-8") as f:
                   boot_ini = f.read()
-              # Replace any .dtb filename with the new output name
-              boot_ini_new = re.sub(r'[\w\-\.]*\.dtb', output_dtb, boot_ini)
+              # Ersetze alle .dtb Namen durch den neuen
+              boot_ini_new = re.sub(r'[\w\-\.]*\.dtb', OUTPUT_DTB, boot_ini)
               with open("boot.ini", "w", encoding="utf-8") as f:
                   f.write(boot_ini_new)
-              print("[*] boot.ini updated to use", output_dtb)
+              print("[*] boot.ini aktualisiert auf", OUTPUT_DTB)
           else:
-              print("[!] boot.ini not found, skipping")
+              print("[!] boot.ini nicht gefunden – überspringe")
 
-          # ---- Verification ----
-          subprocess.run(["dtc", "-I", "dtb", "-O", "dts", "-f", "-o", "verify.dts", output_dtb], check=True)
+          # Verifikation
+          subprocess.run(["dtc", "-I", "dtb", "-O", "dts", "-f", "-o", "verify.dts", OUTPUT_DTB], check=True)
           with open("verify.dts", "r", encoding="utf-8") as f:
               final_dts = f.read()
 
@@ -124,26 +118,25 @@ jobs:
               "==================================================",
               "      M9 PRO DTB PATCH & VERIFICATION",
               "==================================================",
-              f"[+] Source DTB: {base_dtb}",
-              f"[+] Output DTB: {output_dtb}",
-              "[+] Device name replacements:",
+              f"[+] Quelle: {INPUT_DTB}",
+              f"[+] Ausgabe: {OUTPUT_DTB}",
+              "[+] Gerätename ersetzt:",
           ]
           for old, new in replacements:
               log.append(f"  - {old} -> {new}: {'OK' if old not in final_dts else 'MISSING'}")
           log.append("[+] Root model: " + ("OK" if 'model = "M9 Pro - St0len-One";' in final_dts else "MISSING"))
-          log.append("[+] Compatible board: " + ("OK" if 'rk3326-m9pro' in final_dts else "MISSING"))
+          log.append("[+] Compatible: " + ("OK" if 'rk3326-m9pro' in final_dts else "MISSING"))
           log.append("[+] Panel info: " + ("OK" if 'M9 Pro Display' in final_dts else "MISSING"))
-          log.append("[+] m9pro,board property: " + ("OK" if 'm9pro,board' in final_dts else "MISSING"))
-          log.append("[+] boot.ini updated: " + ("OK" if os.path.exists("boot.ini") and output_dtb in open("boot.ini").read() else "CHECK"))
+          log.append("[+] m9pro,board: " + ("OK" if 'm9pro,board' in final_dts else "MISSING"))
 
           log_text = "\n".join(log)
           with open("patch_verification.log", "w", encoding="utf-8") as f:
               f.write(log_text)
           print(log_text)
-          print("[✓] DTB patch completed successfully.")
+          print("[✓] Fertig!")
           EOF
 
-      - name: Upload Patched DTB, boot.ini & Log
+      - name: Upload Artefakte
         uses: actions/upload-artifact@v4
         with:
           name: m9-pro-patched-dtb
@@ -153,12 +146,12 @@ jobs:
             patch_verification.log
           retention-days: 14
 
-      - name: Commit and Push (force)
+      - name: Commit & Push (force)
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           git config --global user.name "github-actions[bot]"
           git config --global user.email "github-actions[bot]@users.noreply.github.com"
           git add rk3326-m9pro-linux.dtb boot.ini patch_verification.log
-          git diff --quiet && git diff --staged --quiet || git commit -m "build(dtb): patch M9 Pro device name & panel for ArkOS4Clones [skip ci]"
+          git diff --quiet && git diff --staged --quiet || git commit -m "build(dtb): patch M9 Pro device name & panel [skip ci]"
           git push --force origin main
