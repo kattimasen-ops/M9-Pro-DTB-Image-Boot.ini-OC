@@ -1,0 +1,185 @@
+name: Build M9 Pro DTB for ArkOS4Clones
+
+on:
+  push:
+    branches: [ main, master ]
+  workflow_dispatch:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: write
+
+jobs:
+  build-dtb:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v4
+
+      - name: Install DTC & Python
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y device-tree-compiler python3
+
+      - name: Patch DTB (Device Name & Panel Info)
+        run: |
+          python3 - << 'EOF'
+          import re, subprocess, os, glob
+
+          # Find the existing DTB (excluding our output)
+          dtb_files = glob.glob("*.dtb")
+          base_dtb = None
+          for f in dtb_files:
+              if not f.startswith("rk3326-m9pro"):
+                  base_dtb = f
+                  break
+          if not base_dtb:
+              print("ERROR: No DTB file found in repository root")
+              exit(1)
+
+          print(f"[*] Using DTB: {base_dtb}")
+
+          # ---- Helper functions ----
+
+          def decompile(dtb_path, dts_path):
+              subprocess.run(["dtc", "-I", "dtb", "-O", "dts", "-f", "-o", dts_path, dtb_path], check=True)
+
+          def compile_dts(dts_path, dtb_path):
+              subprocess.run(["dtc", "-I", "dts", "-O", "dtb", "-f",
+                              "-Wno-unique_unit_address", "-Wno-graph_child_address",
+                              "-o", dtb_path, dts_path], check=True)
+
+          # ---- Decompile ----
+          dts_path = "base.dts"
+          decompile(base_dtb, dts_path)
+          with open(dts_path, "r", encoding="utf-8") as f:
+              dts = f.read()
+
+          # ---- Text replacements for device name ----
+          # Replace all known device identifiers with our target name.
+          # Order matters: more specific strings first.
+          replace_map = [
+              ("aislpc r36t/k36", "M9 Pro - St0len-One"),
+              ("aislpc r36t", "M9 Pro - St0len-One"),
+              ("aislpc r36s", "M9 Pro - St0len-One"),
+              ("aislpc r36", "M9 Pro - St0len-One"),
+              ("r36t/k36", "M9 Pro - St0len-One"),
+              ("r36t", "M9 Pro - St0len-One"),
+              ("r36s", "M9 Pro - St0len-One"),
+              ("k36s", "M9 Pro - St0len-One"),
+              ("k36", "M9 Pro - St0len-One"),
+              ("rk3326-k36s", "rk3326-m9pro"),
+              ("rk3326-k36", "rk3326-m9pro"),
+          ]
+
+          for old, new in replace_map:
+              dts = dts.replace(old, new)
+
+          # ---- Modify root "model" and "compatible" ----
+          # Replace the very first model property (root node)
+          dts = re.sub(r'model\s*=\s*"[^"]*";', 'model = "M9 Pro - St0len-One";', dts, count=1)
+
+          # Replace compatible string if it contains a board reference
+          # We only change the board part (e.g., "rockchip,rk3326-k36" -> "rockchip,rk3326-m9pro")
+          dts = re.sub(r'(compatible\s*=\s*")([^"]*)(";)',
+                       lambda m: m.group(1) + m.group(2).replace('k36', 'm9pro') + m.group(3),
+                       dts, count=1)
+
+          # ---- Insert / ensure display panel info ----
+          # If a panel node exists, add/update its model property
+          if re.search(r'\bpanel\s*\{', dts):
+              dts = re.sub(r'(\bpanel\s*\{[^}]*?)(\bmodel\s*=\s*"[^"]*";)?',
+                           lambda m: m.group(1) + '\n\t\tmodel = "M9 Pro Display";' if not m.group(2) else m.group(0),
+                           dts, flags=re.DOTALL)
+          else:
+              # If no panel node, add a simple display panel node in root
+              panel_node = '''
+      panel {
+          compatible = "simple-panel";
+          model = "M9 Pro Display";
+      };
+'''
+              # Insert before the last closing brace of the root node
+              last_brace = dts.rfind('};')
+              if last_brace != -1:
+                  dts = dts[:last_brace] + panel_node + "\n" + dts[last_brace:]
+
+          # Add a custom property that ArkOS4Clones can read (e.g., for UI display)
+          if 'm9pro,board' not in dts:
+              dts = dts.replace('/ {', '/ {\n\tm9pro,board = "M9 Pro - St0len-One";', 1)
+
+          # ---- Write patched DTS and compile ----
+          with open("merged.dts", "w", encoding="utf-8") as f:
+              f.write(dts)
+
+          output_dtb = "rk3326-m9pro-linux.dtb"
+          print("[*] Compiling final DTB...")
+          compile_dts("merged.dts", output_dtb)
+
+          # ---- Patch boot.ini to use new DTB name ----
+          if os.path.exists("boot.ini"):
+              with open("boot.ini", "r", encoding="utf-8") as f:
+                  boot_ini = f.read()
+              # Replace any occurrence of the old DTB filename with the new one
+              old_name_pattern = r'[\w\-\.]*\.dtb'
+              boot_ini_new = re.sub(old_name_pattern, output_dtb, boot_ini)
+              with open("boot.ini", "w", encoding="utf-8") as f:
+                  f.write(boot_ini_new)
+              print("[*] boot.ini updated to use", output_dtb)
+          else:
+              print("[!] boot.ini not found, skipping")
+
+          # ---- Verification ----
+          decompile(output_dtb, "verify.dts")
+          with open("verify.dts", "r", encoding="utf-8") as f:
+              final_dts = f.read()
+
+          log = [
+              "==================================================",
+              "      M9 PRO DTB PATCH & VERIFICATION",
+              "==================================================",
+              f"[+] Source DTB: {base_dtb}",
+              f"[+] Output DTB: {output_dtb}",
+              "[+] Device name replacements:",
+          ]
+          for old, new in replace_map:
+              if old in dts:
+                  log.append(f"  - {old} -> {new}: FOUND (removed)")
+              else:
+                  log.append(f"  - {old} -> {new}: not present")
+          log.append("[+] Root model: " + ("OK" if 'model = "M9 Pro - St0len-One";' in final_dts else "MISSING"))
+          log.append("[+] Compatible board: " + ("OK" if 'rk3326-m9pro' in final_dts else "MISSING"))
+          log.append("[+] Panel info: " + ("OK" if 'M9 Pro Display' in final_dts else "MISSING"))
+          log.append("[+] m9pro,board property: " + ("OK" if 'm9pro,board' in final_dts else "MISSING"))
+
+          log_text = "\n".join(log)
+          with open("patch_verification.log", "w", encoding="utf-8") as f:
+              f.write(log_text)
+          print(log_text)
+          print("[✓] DTB patch completed successfully.")
+          EOF
+
+      - name: Upload Patched DTB, boot.ini & Log
+        uses: actions/upload-artifact@v4
+        with:
+          name: m9-pro-patched-dtb
+          path: |
+            rk3326-m9pro-linux.dtb
+            boot.ini
+            patch_verification.log
+          retention-days: 14
+
+      - name: Commit and Push (force)
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          git config --global user.name "github-actions[bot]"
+          git config --global user.email "github-actions[bot]@users.noreply.github.com"
+          git add rk3326-m9pro-linux.dtb boot.ini patch_verification.log
+          git diff --quiet && git diff --staged --quiet || git commit -m "build(dtb): patch M9 Pro device name & panel for ArkOS4Clones [skip ci]"
+          git push --force origin main
